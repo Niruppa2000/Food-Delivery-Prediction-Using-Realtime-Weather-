@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -8,9 +7,9 @@ import time
 
 # ==========================================================
 # --- CONFIGURATION (UPDATE THIS) ---
-# NOTE: In a real deployment, this should be stored securely as a Streamlit Secret.
-# For simplicity in this standalone file, update the key below.
-WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f"
+# NOTE: Replace the placeholder below with your *real* API key.
+# Leaving the placeholder will now result in an API error being returned.
+WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f" 
 THRESHOLD_MIN = 10 
 # ==========================================================
 
@@ -26,25 +25,39 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * c
 
 # --- Real-time Weather Function (API Integration) ---
+# Use cache with Time-To-Live (TTL) of 300 seconds (5 minutes) to avoid
+# hitting the weather API too frequently and save usage.
+@st.cache_data(ttl=300)
 def fetch_realtime_weather(latitude, longitude, api_key):
-    """Fetches real-time weather data."""
+    """Fetches real-time weather data. Returns (temp, weather_main)."""
     
-    # Fallback if the user forgets to update the key
-    if api_key == "5197fc88f5f846ee7566eb28d403c91f" or not api_key:
-        return 25.0, 'Clear', 5.0 
+    if not api_key:
+        st.warning("Weather API Key is missing. Using default weather: 25.0°C, 'Clear'")
+        return 25.0, 'Clear'
 
     try:
-        # Use OpenWeatherMap API
+        # OpenWeatherMap API call
         url = f"http://api.openweathermap.org/data/2.5/weather?lat={latitude}&lon={longitude}&appid={api_key}&units=metric"
         response = requests.get(url, timeout=5)
-        response.raise_for_status()
+        response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
         data = response.json()
 
         temp = data['main']['temp']
         weather_main = data['weather'][0]['main'] 
         return temp, weather_main
+    
+    except requests.exceptions.HTTPError as e:
+        # Handle API key errors (401), limits, etc.
+        if response.status_code == 401:
+            st.error("Invalid Weather API Key. Please check the key in the code.")
+        else:
+            st.error(f"Weather API HTTP Error: {e}. Using default weather.")
+        return 25.0, 'Clear' # Fallback on API failure
+        
     except requests.exceptions.RequestException:
-        return np.nan, 'Unknown'
+        # Handle connection errors, timeouts, etc.
+        st.error("Could not connect to the Weather API. Using default weather.")
+        return 25.0, 'Clear'
 
 
 # --- Streamlit Application Layout ---
@@ -71,6 +84,7 @@ if model:
     
     with col1:
         st.subheader("Location & Time")
+        # Added new placeholder coordinates for a slightly longer distance example
         rest_lat = st.number_input("Restaurant Latitude", value=28.65, format="%.4f")
         rest_lon = st.number_input("Restaurant Longitude", value=77.20, format="%.4f")
         del_lat = st.number_input("Delivery Latitude", value=28.70, format="%.4f")
@@ -81,7 +95,8 @@ if model:
         st.subheader("Ratings & Context")
         rating_rest = st.slider("Restaurant Rating", 3.0, 5.0, 4.5, 0.1)
         rating_del = st.slider("Delivery Person Rating", 4.0, 5.0, 4.8, 0.1)
-        current_time_ts = pd.Timestamp(time.time(), unit='s', tz='Asia/Kolkata')
+        # Using a fixed timezone for consistency
+        current_time_ts = pd.Timestamp(time.time(), unit='s', tz='Asia/Kolkata') 
         st.info(f"Current Order Hour (Used for traffic estimation): {current_time_ts.hour}:00")
 
     st.markdown("---")
@@ -96,9 +111,8 @@ if model:
             delivery_distance_km = haversine(rest_lat, rest_lon, del_lat, del_lon)
             
             # Weather (Use Delivery location)
-            
-
-            current_temp, weather_main, _ = fetch_realtime_weather(del_lat, del_lon, WEATHER_API_KEY)
+            # FIX: Only unpack the two expected return values
+            current_temp, weather_main = fetch_realtime_weather(del_lat, del_lon, WEATHER_API_KEY)
             
             # Time & Traffic (Simulated based on hour)
             order_hour = current_time_ts.hour
@@ -122,6 +136,7 @@ if model:
                 'Weather_Condition': [weather_main],
                 'sin_hour': [sin_hour],
                 'cos_hour': [cos_hour],
+                # Safely handle potential NaN temperature from API failure
                 'current_temp_c': [current_temp if not np.isnan(current_temp) else 25.0]
             })
             
@@ -140,7 +155,9 @@ if model:
                 st.metric("Distance", f"{delivery_distance_km:.2f} km")
                 
             with col_res3:
-                st.metric("Current Weather", f"{weather_main}, {current_temp if not np.isnan(current_temp) else 'N/A'}°C")
+                # Safely display temperature, handling the possibility of a non-numeric temp in the fallback
+                temp_display = f"{current_temp:.1f}" if isinstance(current_temp, (int, float)) and not np.isnan(current_temp) else 'N/A'
+                st.metric("Current Weather", f"{weather_main}, {temp_display}°C")
 
             st.markdown(f"**Traffic Estimate:** The model used **{traffic}** traffic density based on the current hour.")
 

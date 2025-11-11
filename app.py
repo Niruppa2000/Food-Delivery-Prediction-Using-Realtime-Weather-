@@ -96,7 +96,9 @@ if model:
             delivery_distance_km = haversine(rest_lat, rest_lon, del_lat, del_lon)
             
             # Weather (Use Delivery location)
-            current_temp, weather_main = fetch_realtime_weather(del_lat, del_lon, WEATHER_API_KEY)
+            
+
+            current_temp, weather_main, _ = fetch_realtime_weather(del_lat, del_lon, WEATHER_API_KEY)
             
             # Time & Traffic (Simulated based on hour)
             order_hour = current_time_ts.hour

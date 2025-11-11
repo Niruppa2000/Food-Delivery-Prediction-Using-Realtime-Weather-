@@ -10,7 +10,7 @@ import time
 # --- CONFIGURATION (UPDATE THIS) ---
 # NOTE: In a real deployment, this should be stored securely as a Streamlit Secret.
 # For simplicity in this standalone file, update the key below.
-WEATHER_API_KEY = "YOUR_OPENWEATHERMAP_API_KEY"
+WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f"
 THRESHOLD_MIN = 10 
 # ==========================================================
 
@@ -30,7 +30,7 @@ def fetch_realtime_weather(latitude, longitude, api_key):
     """Fetches real-time weather data."""
     
     # Fallback if the user forgets to update the key
-    if api_key == "YOUR_OPENWEATHERMAP_API_KEY" or not api_key:
+    if api_key == "5197fc88f5f846ee7566eb28d403c91f" or not api_key:
         return 25.0, 'Clear', 5.0 
 
     try:

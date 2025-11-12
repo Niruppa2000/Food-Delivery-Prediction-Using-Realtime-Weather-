@@ -12,8 +12,9 @@ from datetime import datetime
 WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f" 
 
 # NOTE: For live traffic, obtain a key from HERE Technologies (Routing API).
-# You must obtain a free developer key from their portal.
-HERE_API_KEY = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" # <<< REPLACE THIS
+# This key has been provided by the user and is assumed to be active.
+HERE_API_KEY = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" 
+PLACEHOLDER_CHECK = "PASTE_YOUR_API_KEY_HERE" # Generic placeholder for safety check
 # ==========================================================
 
 # --- Helper Function: Haversine Distance ---
@@ -99,9 +100,9 @@ def fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, api_key):
     Calls HERE Routing API with traffic enabled.
     Returns (estimated_travel_time_traffic_adjusted_min, base_travel_time_min)
     """
-    # 1. Fallback/Simulation Check
-    if api_key == "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw":
-        st.info("⚠️ HERE API Key is a placeholder. Using time-of-day traffic simulation for prediction.")
+    # 1. Fallback/Simulation Check (only checking for missing key, not the specific value)
+    if not api_key or api_key == PLACEHOLDER_CHECK:
+        st.info("⚠️ HERE API Key is missing or invalid. Using time-of-day traffic simulation for prediction.")
         return None, None
         
 
@@ -148,7 +149,9 @@ def fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, api_key):
             st.success("✅ Live traffic data successfully retrieved from HERE API.")
             return traffic_duration_min, base_duration_min
         else:
-            st.warning(f"HERE API found no route or response format was unexpected. Falling back to simulation. Response status: {response.status_code}")
+            # Added more robust error logging if route not found
+            error_message = data.get('error_description', data.get('title', 'Unknown API Error'))
+            st.warning(f"HERE API failed to find route: {error_message}. Falling back to simulation.")
             return None, None
             
     except requests.exceptions.RequestException as e:
@@ -223,14 +226,14 @@ if model:
         rest_lat, rest_lon, rest_location_name = fetch_coordinates(rest_location_input, WEATHER_API_KEY)
         del_lat, del_lon, del_location_name = fetch_coordinates(del_location_input, WEATHER_API_KEY)
         
-        # Display resolved locations
+        # Display resolved locations (Removed Lat/Lon)
         if rest_lat and rest_lon:
-            st.info(f"Restaurant Coords: **{rest_location_name}** ({rest_lat:.4f}, {rest_lon:.4f})")
+            st.info(f"Restaurant Location Resolved: **{rest_location_name}**")
         else:
             st.error("⚠️ Restaurant Location not resolved. Check spelling/API Key.")
 
         if del_lat and del_lon:
-            st.info(f"Delivery Coords: **{del_location_name}** ({del_lat:.4f}, {del_lon:.4f})")
+            st.info(f"Delivery Location Resolved: **{del_location_name}**")
         else:
             st.error("⚠️ Delivery Location not resolved. Check spelling/API Key.")
 
@@ -277,7 +280,7 @@ if model:
             estimated_travel_time_traffic_adjusted, base_travel_time_min_api = api_result
 
             # Fallback logic if API fails or is not configured
-            if HERE_API_KEY == "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" or estimated_travel_time_traffic_adjusted is None:
+            if estimated_travel_time_traffic_adjusted is None:
                 # Recalculate simulation values for display if fallback was used
                 st.info("⚠️ Final traffic calculation using time-of-day simulation.")
                 base_travel_time_min = delivery_distance_km / BASE_SPEED_KM_PER_MIN
@@ -307,7 +310,8 @@ if model:
                 else:
                     traffic_density = 'Low'
 
-            # --- Prediction Dataframe Construction (Fixing the Error) ---
+            # --- Prediction Dataframe Construction (FIXED ERROR) ---
+            
             # We must use the 'Road_Traffic_Density' categorical column!
             input_data = pd.DataFrame({
                 'delivery_distance_km': [delivery_distance_km],
@@ -318,16 +322,15 @@ if model:
                 'sin_hour': [np.sin(2 * np.pi * order_hour / 24)],
                 'cos_hour': [np.cos(2 * np.pi * order_hour / 24)],
                 'current_temp_c': [current_temp if not np.isnan(current_temp) else 25.0],
-                # This is the feature your model is missing (now fixed)
                 'Road_Traffic_Density': [traffic_density] 
             })
             
-            # --- One-Hot Encode Categorical Features ---
-            # Recreate all expected columns for Weather and Traffic Density, 
-            # including the ones not present in this specific prediction.
-            
-            # The model expects specific, known column names from training.
-            
+            # 1. Create dummies from the input data
+            input_data_encoded = pd.get_dummies(input_data, 
+                                                columns=['Road_Traffic_Density', 'Weather_Condition'], 
+                                                drop_first=False)
+
+            # 2. Define the full list of expected feature columns (including all possible OHE columns)
             # Known Traffic Densities
             traffic_cols = ['Road_Traffic_Density_High', 'Road_Traffic_Density_Jam', 
                             'Road_Traffic_Density_Low', 'Road_Traffic_Density_Medium']
@@ -337,32 +340,15 @@ if model:
                             'Weather_Condition_Clear', 'Weather_Condition_Windy',
                             'Weather_Condition_Sunny', 'Weather_Condition_Haze',
                             'Weather_Condition_Snow', 'Weather_Condition_Rain']
-            
-            # Initialize all required dummy columns to 0
-            for col in traffic_cols + weather_cols:
-                if col not in input_data.columns:
-                    input_data[col] = 0
 
-            # Create the actual dummy variables for the current prediction
-            input_data_encoded = pd.get_dummies(input_data, columns=['Road_Traffic_Density', 'Weather_Condition'], drop_first=False)
-            
-            # Ensure all the required OHE columns are present (setting to 0 if missing from this prediction)
-            for col in traffic_cols + weather_cols:
-                if col not in input_data_encoded.columns:
-                    input_data_encoded[col] = 0
-            
-            # Drop the original categorical columns
-            input_data_encoded = input_data_encoded.drop(columns=['Road_Traffic_Density', 'Weather_Condition'], errors='ignore')
-            
-            # Final feature set (must match the order and names the model was trained on)
-            # NOTE: We MUST ensure the columns are ordered exactly as the model expects.
-            # This order is based on a common scenario for this model structure.
+            # The model's expected feature order:
             final_features = ['delivery_distance_km', 'preparation_time_min', 
                               'restaurant_rating', 'delivery_person_rating', 
                               'sin_hour', 'cos_hour', 'current_temp_c'] + traffic_cols + weather_cols
-            
-            # Filter and order the columns for the model
-            input_data_final = input_data_encoded.filter(final_features, axis=1)
+
+            # 3. Use reindex to guarantee all columns are present (filling missing OHE columns with 0)
+            # and ensure they are in the correct order. This is the fix for the ValueError.
+            input_data_final = input_data_encoded.reindex(columns=final_features, fill_value=0)
             
             # --- Prediction ---
             try:

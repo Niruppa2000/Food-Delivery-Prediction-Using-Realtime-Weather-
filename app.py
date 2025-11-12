@@ -1,9 +1,11 @@
+# app.py (UPDATED autocomplete + autofill top suggestion)
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
 import requests
 import time
+import uuid
 from datetime import datetime
 
 # ================== CONFIG ==================
@@ -23,11 +25,11 @@ def haversine(lat1, lon1, lat2, lon2):
     c = 2 * np.arcsin(np.sqrt(a))
     return R * c
 
-# --- Google Places Autocomplete (server-side) ---
-@st.cache_data(ttl=300)
-def places_autocomplete(query, key, sessiontoken=None):
+# --- Places Autocomplete (server-side) with session token ---
+@st.cache_data(ttl=180)
+def places_autocomplete(query, key, session_token=None, country_code="in"):
     """
-    Call Google Places Autocomplete API to get text suggestions.
+    Calls Google Places Autocomplete API (server-side).
     Returns list of dicts: [{'description':..., 'place_id':...}, ...]
     """
     if not query or len(query.strip()) < 1:
@@ -37,59 +39,67 @@ def places_autocomplete(query, key, sessiontoken=None):
         params = {
             "input": query,
             "key": key,
-            "components": "country:in",  # restrict to India; remove or change if global
-            "types": "geocode",  # restrict to addresses
+            "types": "address",            # focus on addresses
+            "components": f"country:{country_code}",  # restrict to India (change/remove if global)
+            "sessiontoken": session_token
         }
-        if sessiontoken:
-            params["sessiontoken"] = sessiontoken
         resp = requests.get(url, params=params, timeout=5)
         resp.raise_for_status()
         data = resp.json()
-        if data.get("status") not in ("OK", "ZERO_RESULTS"):
-            # e.g., OVER_QUERY_LIMIT, REQUEST_DENIED
+        status = data.get("status")
+        if status not in ("OK", "ZERO_RESULTS"):
+            # e.g., OVER_QUERY_LIMIT, REQUEST_DENIED -> return empty gracefully
             return []
-        results = []
-        for pred in data.get("predictions", []):
-            results.append({"description": pred.get("description"), "place_id": pred.get("place_id")})
-        return results
+        preds = []
+        for p in data.get("predictions", []):
+            preds.append({"description": p.get("description"), "place_id": p.get("place_id")})
+        return preds
     except Exception:
         return []
 
 @st.cache_data(ttl=300)
-def get_place_details(place_id, key):
+def get_place_details(place_id, key, sessiontoken=None):
     """
     Given a place_id, call Place Details to get formatted_address and lat/lng.
     Returns (formatted_address, lat, lng) or (None, None, None)
     """
+    if not place_id:
+        return None, None, None
     try:
         url = "https://maps.googleapis.com/maps/api/place/details/json"
-        params = {"place_id": place_id, "key": key, "fields": "formatted_address,geometry"}
+        params = {"place_id": place_id, "key": key, "fields": "formatted_address,geometry", "sessiontoken": sessiontoken}
         resp = requests.get(url, params=params, timeout=5)
         resp.raise_for_status()
         data = resp.json()
         if data.get("status") != "OK":
             return None, None, None
-        result = data.get("result", {})
-        formatted = result.get("formatted_address")
-        geom = result.get("geometry", {}).get("location", {})
-        lat = geom.get("lat")
-        lng = geom.get("lng")
-        return formatted, lat, lng
+        res = data.get("result", {})
+        formatted = res.get("formatted_address")
+        geom = res.get("geometry", {}).get("location", {})
+        return formatted, geom.get("lat"), geom.get("lng")
     except Exception:
         return None, None, None
 
-# --- Reverse Geocode fallback (Google) ---
-def reverse_geocode_google(lat, lon, api_key):
+# --- Geocode fallback ---
+@st.cache_data(ttl=300)
+def geocode_text_fallback(text, key):
+    """Use Google Geocoding API to convert typed address -> lat/lon + formatted"""
+    if not text:
+        return None, None, None
     try:
-        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&key={api_key}"
-        r = requests.get(url, timeout=5)
+        url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {"address": text, "key": key}
+        r = requests.get(url, params=params, timeout=6)
         r.raise_for_status()
-        d = r.json()
-        if d.get("status") == "OK" and d.get("results"):
-            return d["results"][0]["formatted_address"]
-        return None
+        j = r.json()
+        if j.get("status") == "OK" and j.get("results"):
+            res = j["results"][0]
+            formatted = res.get("formatted_address")
+            loc = res.get("geometry", {}).get("location", {})
+            return formatted, loc.get("lat"), loc.get("lng")
+        return None, None, None
     except Exception:
-        return None
+        return None, None, None
 
 # --- Weather & HERE traffic (unchanged logic) ---
 @st.cache_data(ttl=300)
@@ -140,7 +150,7 @@ def fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, api_key):
     except Exception:
         return None, None
 
-# --- Model load ---
+# --- Model loading ---
 st.set_page_config(page_title="Delivery Predictor", layout="wide")
 st.title("🍔 Real-Time Food Delivery Late Prediction")
 st.markdown("Predict the probability of a late delivery based on real-time weather, traffic-adjusted travel time, and restaurant data.")
@@ -158,7 +168,17 @@ except Exception as e:
 if not model:
     st.stop()
 
-# ---- UI with autocomplete ----
+# --- Initialize session variables ---
+if "session_token" not in st.session_state:
+    st.session_state["session_token"] = str(uuid.uuid4())
+if "rest_address" not in st.session_state:
+    st.session_state["rest_address"] = ""
+if "del_address" not in st.session_state:
+    st.session_state["del_address"] = ""
+if "auto_fill_top" not in st.session_state:
+    st.session_state["auto_fill_top"] = True  # set True to auto-fill top suggestion
+
+# ---- UI with improved autocomplete/autofill ----
 col1, col2 = st.columns(2)
 current_time_ts = datetime.now()
 order_hour = current_time_ts.hour
@@ -167,100 +187,101 @@ BASE_SPEED_KM_PER_MIN = 0.5
 with col1:
     st.subheader("Restaurant & Delivery Location")
 
-    # Restaurant input with autocomplete logic
-    rest_query = st.text_input("Restaurant Location (start typing...)",
-                               value=st.session_state.get("rest_text", "Bangalore, India"),
-                               key="rest_input")
+    # Restaurant input
+    rest_query = st.text_input("Restaurant Location (start typing...)", value=st.session_state.get("rest_text", ""), key="rest_input")
 
-    # When the user types 3+ chars, fetch suggestions
+    # Only search when user typed >= 3 chars
     rest_suggestions = []
     if rest_query and len(rest_query.strip()) >= 3:
-        rest_suggestions = places_autocomplete(rest_query, GOOGLE_MAPS_API_KEY)
+        rest_suggestions = places_autocomplete(rest_query.strip(), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
 
     rest_choice = None
     if rest_suggestions:
-        # Build options list for selectbox
-        rest_opts = [s["description"] for s in rest_suggestions]
-        # Prepend a hint
-        sel = st.selectbox("Choose restaurant from suggestions", options=["-- pick suggestion --"] + rest_opts, key="rest_select")
-        if sel != "-- pick suggestion --":
-            idx = rest_opts.index(sel)
-            picked = rest_suggestions[idx]
-            # Fetch details
-            formatted, lat, lng = get_place_details(picked["place_id"], GOOGLE_MAPS_API_KEY)
-            if formatted:
-                st.session_state["rest_text"] = formatted
-                st.session_state["rest_address"] = formatted
-                st.session_state["rest_lat"] = lat
-                st.session_state["rest_lon"] = lng
-                rest_choice = {"address": formatted, "lat": lat, "lon": lng}
-                st.success(f"Selected: {formatted}")
+        # Auto-fill top suggestion behavior:
+        top_desc = rest_suggestions[0]["description"]
+        # If auto_fill_top enabled and the typed text is a prefix of top suggestion, update input to top suggestion
+        if st.session_state["auto_fill_top"]:
+            typed = rest_query.strip().lower()
+            if top_desc.lower().startswith(typed) and top_desc.lower() != typed:
+                # update text input with top suggestion (this triggers rerun)
+                st.session_state["rest_input"] = top_desc
+                # also fetch details immediately
+                formatted, lat, lng = get_place_details(rest_suggestions[0]["place_id"], GOOGLE_MAPS_API_KEY, sessiontoken=st.session_state["session_token"])
+                if formatted:
+                    st.session_state["rest_address"] = formatted
+                    st.session_state["rest_lat"] = lat
+                    st.session_state["rest_lon"] = lng
+                    rest_choice = {"address": formatted, "lat": lat, "lon": lng}
+        # If user wants to pick specifically, show selectbox
+        if not rest_choice:
+            rest_opts = [s["description"] for s in rest_suggestions]
+            sel = st.selectbox("Choose restaurant from suggestions (optional)", options=["-- pick suggestion --"] + rest_opts, key="rest_select")
+            if sel != "-- pick suggestion --":
+                idx = rest_opts.index(sel)
+                picked = rest_suggestions[idx]
+                formatted, lat, lng = get_place_details(picked["place_id"], GOOGLE_MAPS_API_KEY, sessiontoken=st.session_state["session_token"])
+                if formatted:
+                    st.session_state["rest_address"] = formatted
+                    st.session_state["rest_lat"] = lat
+                    st.session_state["rest_lon"] = lng
+                    rest_choice = {"address": formatted, "lat": lat, "lon": lng}
+                    st.success(f"Selected: {formatted}")
 
-    # If user didn't pick but already had a previous selection in session_state, show it
-    if "rest_address" in st.session_state and not rest_choice:
-        st.markdown(f"**Restaurant (selected):** {st.session_state['rest_address']}")
-
-    # Delivery input with autocomplete logic
-    del_query = st.text_input("Delivery Location (start typing...)", value=st.session_state.get("del_text", "Mangalore, India"), key="del_input")
-
-    del_suggestions = []
-    if del_query and len(del_query.strip()) >= 3:
-        del_suggestions = places_autocomplete(del_query, GOOGLE_MAPS_API_KEY)
-
-    del_choice = None
-    if del_suggestions:
-        del_opts = [s["description"] for s in del_suggestions]
-        sel2 = st.selectbox("Choose delivery from suggestions", options=["-- pick suggestion --"] + del_opts, key="del_select")
-        if sel2 != "-- pick suggestion --":
-            idx2 = del_opts.index(sel2)
-            picked2 = del_suggestions[idx2]
-            formatted2, lat2, lng2 = get_place_details(picked2["place_id"], GOOGLE_MAPS_API_KEY)
-            if formatted2:
-                st.session_state["del_text"] = formatted2
-                st.session_state["del_address"] = formatted2
-                st.session_state["del_lat"] = lat2
-                st.session_state["del_lon"] = lng2
-                del_choice = {"address": formatted2, "lat": lat2, "lon": lng2}
-                st.success(f"Selected: {formatted2}")
-
-    if "del_address" in st.session_state and not del_choice:
-        st.markdown(f"**Delivery (selected):** {st.session_state['del_address']}")
-
-    # Fallback: if user didn't pick suggestion but typed a full address, try geocoding it
-    def geocode_text_fallback(text):
-        if not text: return None, None, None
-        try:
-            url = "https://maps.googleapis.com/maps/api/geocode/json"
-            params = {"address": text, "key": GOOGLE_MAPS_API_KEY}
-            r = requests.get(url, params=params, timeout=5)
-            r.raise_for_status()
-            j = r.json()
-            if j.get("status") == "OK" and j.get("results"):
-                res = j["results"][0]
-                formatted = res.get("formatted_address")
-                loc = res.get("geometry", {}).get("location", {})
-                return formatted, loc.get("lat"), loc.get("lng")
-            return None, None, None
-        except Exception:
-            return None, None, None
-
-    # Try to ensure we have rest_lat/lon & del_lat/lon in session_state if user didn't pick suggestion
-    if "rest_lat" not in st.session_state or "rest_lon" not in st.session_state:
-        # attempt to geocode the typed text if user has entered something
-        if rest_query and len(rest_query.strip()) >= 5:
-            f, la, lo = geocode_text_fallback(rest_query)
+    # If no suggestions or user typed fully, fallback to geocoding when user typed > 6 chars
+    if not rest_choice and rest_query and len(rest_query.strip()) >= 6:
+        # If user previously had a resolved address already and text hasn't changed, reuse it
+        if st.session_state.get("rest_address") and st.session_state.get("rest_text") == rest_query:
+            pass
+        else:
+            f, la, lo = geocode_text_fallback(rest_query, GOOGLE_MAPS_API_KEY)
             if f:
                 st.session_state["rest_address"] = f
                 st.session_state["rest_lat"] = la
                 st.session_state["rest_lon"] = lo
 
-    if "del_lat" not in st.session_state or "del_lon" not in st.session_state:
-        if del_query and len(del_query.strip()) >= 5:
-            f2, la2, lo2 = geocode_text_fallback(del_query)
-            if f2:
-                st.session_state["del_address"] = f2
-                st.session_state["del_lat"] = la2
-                st.session_state["del_lon"] = lo2
+    # Delivery input
+    del_query = st.text_input("Delivery Location (start typing...)", value=st.session_state.get("del_text", ""), key="del_input")
+
+    del_suggestions = []
+    if del_query and len(del_query.strip()) >= 3:
+        del_suggestions = places_autocomplete(del_query.strip(), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
+
+    del_choice = None
+    if del_suggestions:
+        top_desc2 = del_suggestions[0]["description"]
+        if st.session_state["auto_fill_top"]:
+            typed2 = del_query.strip().lower()
+            if top_desc2.lower().startswith(typed2) and top_desc2.lower() != typed2:
+                st.session_state["del_input"] = top_desc2
+                formatted2, lat2, lng2 = get_place_details(del_suggestions[0]["place_id"], GOOGLE_MAPS_API_KEY, sessiontoken=st.session_state["session_token"])
+                if formatted2:
+                    st.session_state["del_address"] = formatted2
+                    st.session_state["del_lat"] = lat2
+                    st.session_state["del_lon"] = lng2
+                    del_choice = {"address": formatted2, "lat": lat2, "lon": lng2}
+        if not del_choice:
+            del_opts = [s["description"] for s in del_suggestions]
+            sel2 = st.selectbox("Choose delivery from suggestions (optional)", options=["-- pick suggestion --"] + del_opts, key="del_select")
+            if sel2 != "-- pick suggestion --":
+                idx2 = del_opts.index(sel2)
+                picked2 = del_suggestions[idx2]
+                formatted2, lat2, lng2 = get_place_details(picked2["place_id"], GOOGLE_MAPS_API_KEY, sessiontoken=st.session_state["session_token"])
+                if formatted2:
+                    st.session_state["del_address"] = formatted2
+                    st.session_state["del_lat"] = lat2
+                    st.session_state["del_lon"] = lng2
+                    del_choice = {"address": formatted2, "lat": lat2, "lon": lng2}
+                    st.success(f"Selected: {formatted2}")
+
+    if not del_choice and del_query and len(del_query.strip()) >= 6:
+        f2, la2, lo2 = geocode_text_fallback(del_query, GOOGLE_MAPS_API_KEY)
+        if f2:
+            st.session_state["del_address"] = f2
+            st.session_state["del_lat"] = la2
+            st.session_state["del_lon"] = lo2
+
+    # optional toggle for user to disable auto-fill if they prefer manual typing
+    st.checkbox("Auto-fill top suggestion while typing (Google-like)", value=st.session_state["auto_fill_top"], key="auto_fill_top_checkbox")
 
 with col2:
     st.subheader("Order Context")
@@ -272,26 +293,23 @@ st.markdown("---")
 
 # Predict button
 if st.button("PREDICT LATE DELIVERY RISK", use_container_width=True, type="primary"):
-    # Ensure coordinates exist
     rest_lat = st.session_state.get("rest_lat")
     rest_lon = st.session_state.get("rest_lon")
     del_lat = st.session_state.get("del_lat")
     del_lon = st.session_state.get("del_lon")
 
     if not all([rest_lat, rest_lon, del_lat, del_lon]):
-        st.error("⚠️ Could not resolve one or both addresses. Try selecting a suggestion from the dropdown or type a clearer address.")
+        st.error("⚠️ Could not resolve one or both addresses. Try selecting a suggestion or type a clearer address.")
         st.stop()
 
-    # Feature engineering
+    # Feature engineering & prediction (same logic)
     delivery_distance_km = haversine(rest_lat, rest_lon, del_lat, del_lon)
     current_temp, weather_main = fetch_realtime_weather(del_lat, del_lon, WEATHER_API_KEY)
     api_result = fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, HERE_API_KEY)
     estimated_travel_time_traffic_adjusted, base_travel_time_min_api = api_result
 
-    # Fallback traffic simulation if HERE failed
     if estimated_travel_time_traffic_adjusted is None:
         base_travel_time_min = delivery_distance_km / BASE_SPEED_KM_PER_MIN
-        # simple time-of-day multipliers
         if 17 <= order_hour <= 21:
             multiplier = 1.67
         elif 12 <= order_hour <= 14:
@@ -313,7 +331,6 @@ if st.button("PREDICT LATE DELIVERY RISK", use_container_width=True, type="prima
         else:
             traffic_density = 'Low'
 
-    # Build input df
     sin_hour = np.sin(2 * np.pi * order_hour / 24)
     cos_hour = np.cos(2 * np.pi * order_hour / 24)
     input_data_final = pd.DataFrame([{
@@ -352,8 +369,6 @@ if st.button("PREDICT LATE DELIVERY RISK", use_container_width=True, type="prima
     else:
         st.success("✅ LOW RISK: Likely on-time.")
 
-    # Show resolved addresses
-    st.caption(f"Prediction based on: Restaurant @ **{st.session_state.get('rest_address')}** to Delivery @ **{st.session_state.get('del_address')}**")
+    st.caption(f"Prediction based on: Restaurant @ **{st.session_state.get('rest_address','(not set)')}** to Delivery @ **{st.session_state.get('del_address','(not set)')}**")
 
-# END of file
-
+# END

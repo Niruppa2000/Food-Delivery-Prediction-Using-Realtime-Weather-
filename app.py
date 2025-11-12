@@ -14,7 +14,8 @@ WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f"
 # NOTE: For live traffic, obtain a key from HERE Technologies (Routing API).
 # This key has been provided by the user and is assumed to be active.
 HERE_API_KEY = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" 
-PLACEHOLDER_CHECK = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" # Generic placeholder for safety check
+# FIX 1: Reverting PLACEHOLDER_CHECK to a generic value so the actual key is not flagged as a placeholder.
+PLACEHOLDER_CHECK = "PASTE_YOUR_API_KEY_HERE" 
 # ==========================================================
 
 # --- Helper Function: Haversine Distance ---
@@ -100,9 +101,9 @@ def fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, api_key):
     Calls HERE Routing API with traffic enabled.
     Returns (estimated_travel_time_traffic_adjusted_min, base_travel_time_min)
     """
-    # 1. Fallback/Simulation Check (only checking for missing key, not the specific value)
+    # 1. Fallback/Simulation Check (only checking for missing key or if it's the placeholder)
     if not api_key or api_key == PLACEHOLDER_CHECK:
-        st.info("⚠️ HERE API Key is missing or invalid. Using time-of-day traffic simulation for prediction.")
+        # FIX 2: Removed the blue info box about API key being missing, as requested
         return None, None
         
 
@@ -209,9 +210,6 @@ if model:
         traffic_label_sim = 'Low (Multiplier: 1.0x)'
         traffic_icon = "💨"
     
-    # REMOVED: st.markdown(f"**Current Hour Traffic Adjustment...**")
-    # REMOVED: st.markdown("---")
-
 
     # --- Location Inputs (Text-based) ---
     with col1:
@@ -281,7 +279,7 @@ if model:
             # Fallback logic if API fails or is not configured
             if estimated_travel_time_traffic_adjusted is None:
                 # Recalculate simulation values for display if fallback was used
-                st.info("⚠️ Final traffic calculation using time-of-day simulation.")
+                # FIX 3: Removed the blue info box about using time-of-day simulation after button click. 
                 base_travel_time_min = delivery_distance_km / BASE_SPEED_KM_PER_MIN
                 
                 if 17 <= order_hour <= 21: traffic_multiplier_sim = 1.67
@@ -372,7 +370,6 @@ if model:
             else:
                 st.success("✅ **LOW RISK:** Delivery is likely to be on time.")
 
-            # REMOVED: st.markdown("---")
             st.caption(f"Prediction based on: Restaurant @ **{rest_location_name}** to Delivery @ **{del_location_name}**")
             
 # --- Final Check ---

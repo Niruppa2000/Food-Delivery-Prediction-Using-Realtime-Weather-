@@ -1,5 +1,6 @@
 # app.py
-# Updated: hides google key in env, removes blue info boxes, adds debug prints for troubleshooting
+# Cleaned UX: no debug JSON, no extra suggestion line.
+# Google key from environment; WEATHER/HERE keys inline (per user request)
 
 import os
 import uuid
@@ -10,23 +11,20 @@ import numpy as np
 import streamlit as st
 from datetime import datetime
 
-# Try to load .env for local dev if python-dotenv is installed (optional)
+# Optional: load .env in local dev if python-dotenv present
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-# ---------- CONFIG ----------
-# Ensure your secret key name in GitHub/Streamlit is EXACTLY: GOOGLE_MAPS_API_KEY
+# Config: GOOGLE key from env (Streamlit secret), weather & here inline
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
-
-# Per your request: weather and here keys inline
 WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f"
 HERE_API_KEY = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw"
 PLACEHOLDER_CHECK = "PASTE_YOUR_API_KEY_HERE"
 
-# ---------- Helpers ----------
+# Utility
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371.0
     lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
@@ -36,11 +34,11 @@ def haversine(lat1, lon1, lat2, lon2):
     c = 2 * np.arcsin(np.sqrt(a))
     return R * c
 
-# ---------- Google API helpers ----------
+# Google helpers
 @st.cache_data(ttl=180)
 def places_autocomplete(query: str, key: str, session_token: str = None, country_code: str = "in"):
     if not key or not query or len(query.strip()) < 1:
-        return []
+        return {}
     try:
         url = "https://maps.googleapis.com/maps/api/place/autocomplete/json"
         params = {"input": query, "key": key, "types": "address", "components": f"country:{country_code}"}
@@ -50,12 +48,12 @@ def places_autocomplete(query: str, key: str, session_token: str = None, country
         r.raise_for_status()
         return r.json()
     except Exception:
-        return {"status": "ERROR", "predictions": []}
+        return {}
 
 @st.cache_data(ttl=300)
 def get_place_details(place_id: str, key: str, session_token: str = None):
     if not place_id or not key:
-        return None, None, None, {}
+        return None, None, None
     try:
         url = "https://maps.googleapis.com/maps/api/place/details/json"
         params = {"place_id": place_id, "key": key, "fields": "formatted_address,geometry"}
@@ -65,18 +63,18 @@ def get_place_details(place_id: str, key: str, session_token: str = None):
         r.raise_for_status()
         j = r.json()
         if j.get("status") != "OK":
-            return None, None, None, j
+            return None, None, None
         res = j.get("result", {})
         formatted = res.get("formatted_address")
         geom = res.get("geometry", {}).get("location", {})
-        return formatted, geom.get("lat"), geom.get("lng"), j
+        return formatted, geom.get("lat"), geom.get("lng")
     except Exception:
-        return None, None, None, {}
+        return None, None, None
 
 @st.cache_data(ttl=300)
 def geocode_text_fallback(text: str, key: str):
     if not text or not key:
-        return None, None, None, {}
+        return None, None, None
     try:
         url = "https://maps.googleapis.com/maps/api/geocode/json"
         params = {"address": text, "key": key}
@@ -87,12 +85,12 @@ def geocode_text_fallback(text: str, key: str):
             res = j["results"][0]
             formatted = res.get("formatted_address")
             loc = res.get("geometry", {}).get("location", {})
-            return formatted, loc.get("lat"), loc.get("lng"), j
-        return None, None, None, j
+            return formatted, loc.get("lat"), loc.get("lng")
+        return None, None, None
     except Exception:
-        return None, None, None, {}
+        return None, None, None
 
-# ---------- Weather & HERE traffic ----------
+# Weather & traffic
 @st.cache_data(ttl=300)
 def fetch_realtime_weather(lat: float, lon: float, api_key: str):
     if not api_key:
@@ -128,151 +126,114 @@ def fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, api_key):
     except Exception:
         return None, None
 
-# ---------- UI ----------
+# App UI
 st.set_page_config(page_title="Real-Time Delivery Late Prediction", layout="wide")
 st.title("🍔 Real-Time Food Delivery Late Prediction")
-st.markdown("Predict the probability of a late delivery using real-time weather, traffic-adjusted travel time and restaurant data.")
+st.markdown("Predict the probability of a late delivery based on real-time weather, traffic-adjusted travel time, and restaurant data.")
 
-# DEBUG toggle
-debug_mode = st.sidebar.checkbox("Show debug info (autocomplete JSON etc.)", value=False)
-
-# quick environment key check
-if debug_mode:
-    st.sidebar.write("GOOGLE_MAPS_API_KEY present:", bool(GOOGLE_MAPS_API_KEY))
-
-# user guidance about secrets
+# Show if Google key present
 if not GOOGLE_MAPS_API_KEY:
-    st.warning("Google API key not found in environment. Make sure your secret is named EXACTLY: GOOGLE_MAPS_API_KEY.")
+    st.warning("Google API key not found in environment. Make sure secret name is EXACTLY: GOOGLE_MAPS_API_KEY.")
 else:
-    if not debug_mode:
-        st.success("Google API key found. Autocomplete enabled (if you still see no suggestions, enable Debug and check API responses).")
-    else:
-        st.info("Google API key found — debug mode ON.")
+    st.success("Google API key found — Autocomplete enabled.")
 
 # load model
 try:
     model = joblib.load("late_delivery_predictor_model.pkl")
     st.success("Model loaded successfully for prediction.")
+except FileNotFoundError:
+    st.error("Model file 'late_delivery_predictor_model.pkl' not found. Upload it.")
+    st.stop()
 except Exception as e:
-    st.error("Model load error: ensure 'late_delivery_predictor_model.pkl' is present.")
+    st.error(f"Error loading model: {e}")
     st.stop()
 
-# session token for Places
+# session token for grouping autocomplete requests
 if "session_token" not in st.session_state:
     st.session_state["session_token"] = str(uuid.uuid4())
 
+# UI inputs
 col1, col2 = st.columns(2)
 order_hour = datetime.now().hour
 BASE_SPEED_KM_PER_MIN = 0.5
 
 with col1:
     st.subheader("Restaurant & Delivery Location")
-    rest_query = st.text_input("Restaurant Location (start typing...)", value=st.session_state.get("rest_text", ""), key="rest_input")
-    del_query  = st.text_input("Delivery Location (start typing...)",  value=st.session_state.get("del_text", ""),  key="del_input")
-    st.checkbox("Auto-fill top suggestion while typing (Google-like)", value=st.session_state.get("auto_fill_top", True), key="auto_fill_top_checkbox")
+    # user-typed inputs (auto-filled by code where possible)
+    rest_input = st.text_input("Restaurant Location (start typing...)", value=st.session_state.get("rest_input", ""))
+    del_input = st.text_input("Delivery Location (start typing...)", value=st.session_state.get("del_input", ""))
+    auto_fill = st.checkbox("Auto-fill top suggestion while typing (Google-like)", value=True)
 
-    # get autocomplete JSON (raw)
+    # request suggestions only when user typed >=3 chars and key present
     rest_json = {}
-    del_json  = {}
-    if rest_query and len(rest_query.strip()) >= 3 and GOOGLE_MAPS_API_KEY:
-        rest_json = places_autocomplete(rest_query.strip(), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
-        if debug_mode:
-            st.code(rest_json, language="json")
-    if del_query and len(del_query.strip()) >= 3 and GOOGLE_MAPS_API_KEY:
-        del_json = places_autocomplete(del_query.strip(), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
-        if debug_mode:
-            st.code(del_json, language="json")
+    del_json = {}
+    if rest_input and len(rest_input.strip()) >= 3 and GOOGLE_MAPS_API_KEY:
+        rest_json = places_autocomplete(rest_input.strip(), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
+    if del_input and len(del_input.strip()) >= 3 and GOOGLE_MAPS_API_KEY:
+        del_json = places_autocomplete(del_input.strip(), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
 
-    # process restaurant suggestions
-    rest_choice = None
+    # Process restaurant suggestions: prefer auto-fill top suggestion
     rest_predictions = rest_json.get("predictions", []) if isinstance(rest_json, dict) else []
-    if rest_predictions:
-        top = rest_predictions[0]["description"]
-        if st.session_state.get("auto_fill_top", True):
-            typed = rest_query.strip().lower()
-            if top.lower().startswith(typed) and top.lower() != typed:
-                # auto-fill top suggestion
-                st.session_state["rest_input"] = top
-                # fetch place details
-                formatted, lat, lon, details_json = get_place_details(rest_predictions[0]["place_id"], GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
-                if debug_mode:
-                    st.code(details_json, language="json")
+    if rest_predictions and auto_fill:
+        top = rest_predictions[0].get("description")
+        # if typed is a prefix of top suggestion, replace input with top (Google-like predictive)
+        typed = rest_input.strip().lower()
+        if top and top.lower().startswith(typed) and top.lower() != typed:
+            # auto-update input - store back to session state and treat as accepted top suggestion
+            st.session_state["rest_input"] = top
+            rest_input = top
+            # fetch place details for top suggestion
+            formatted, lat, lon = get_place_details(rest_predictions[0].get("place_id"), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
+            if formatted:
+                st.session_state["rest_address"] = formatted
+                st.session_state["rest_lat"] = lat
+                st.session_state["rest_lon"] = lon
+
+    # If user prefers to pick other suggestion, show compact expander (no persistent line)
+    if rest_predictions and len(rest_predictions) > 1:
+        with st.expander("Show other restaurant suggestions", expanded=False):
+            # compact list of descriptions
+            options = [p.get("description") for p in rest_predictions]
+            pick = st.selectbox("Other suggestions", options=["-- pick --"] + options, key="rest_alt")
+            if pick and pick != "-- pick --":
+                idx = options.index(pick)
+                pid = rest_predictions[idx].get("place_id")
+                formatted, lat, lon = get_place_details(pid, GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
                 if formatted:
-                    st.session_state["rest_address"] = formatted
-                    st.session_state["rest_lat"] = lat
-                    st.session_state["rest_lon"] = lon
-                    rest_choice = True
-        if not rest_choice:
-            opts = [p["description"] for p in rest_predictions]
-            sel = st.selectbox("Choose restaurant suggestion (optional)", options=["-- pick suggestion --"] + opts, key="rest_select")
-            if sel != "-- pick suggestion --":
-                idx = opts.index(sel)
-                pid = rest_predictions[idx]["place_id"]
-                formatted, lat, lon, details_json = get_place_details(pid, GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
-                if debug_mode:
-                    st.code(details_json, language="json")
-                if formatted:
+                    st.session_state["rest_input"] = formatted
                     st.session_state["rest_address"] = formatted
                     st.session_state["rest_lat"] = lat
                     st.session_state["rest_lon"] = lon
                     st.success(f"Selected: {formatted}")
 
-    # process delivery suggestions
-    del_choice = None
+    # Delivery suggestions - same behavior
     del_predictions = del_json.get("predictions", []) if isinstance(del_json, dict) else []
-    if del_predictions:
-        top2 = del_predictions[0]["description"]
-        if st.session_state.get("auto_fill_top", True):
-            typed2 = del_query.strip().lower()
-            if top2.lower().startswith(typed2) and top2.lower() != typed2:
-                st.session_state["del_input"] = top2
-                formatted2, lat2, lon2, details_json2 = get_place_details(del_predictions[0]["place_id"], GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
-                if debug_mode:
-                    st.code(details_json2, language="json")
+    if del_predictions and auto_fill:
+        top2 = del_predictions[0].get("description")
+        typed2 = del_input.strip().lower()
+        if top2 and top2.lower().startswith(typed2) and top2.lower() != typed2:
+            st.session_state["del_input"] = top2
+            del_input = top2
+            formatted2, lat2, lon2 = get_place_details(del_predictions[0].get("place_id"), GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
+            if formatted2:
+                st.session_state["del_address"] = formatted2
+                st.session_state["del_lat"] = lat2
+                st.session_state["del_lon"] = lon2
+
+    if del_predictions and len(del_predictions) > 1:
+        with st.expander("Show other delivery suggestions", expanded=False):
+            options2 = [p.get("description") for p in del_predictions]
+            pick2 = st.selectbox("Other suggestions", options=["-- pick --"] + options2, key="del_alt")
+            if pick2 and pick2 != "-- pick --":
+                idx2 = options2.index(pick2)
+                pid2 = del_predictions[idx2].get("place_id")
+                formatted2, lat2, lon2 = get_place_details(pid2, GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
                 if formatted2:
-                    st.session_state["del_address"] = formatted2
-                    st.session_state["del_lat"] = lat2
-                    st.session_state["del_lon"] = lon2
-                    del_choice = True
-        if not del_choice:
-            opts2 = [p["description"] for p in del_predictions]
-            sel2 = st.selectbox("Choose delivery suggestion (optional)", options=["-- pick suggestion --"] + opts2, key="del_select")
-            if sel2 != "-- pick suggestion --":
-                idx2 = opts2.index(sel2)
-                pid2 = del_predictions[idx2]["place_id"]
-                formatted2, lat2, lon2, details_json2 = get_place_details(pid2, GOOGLE_MAPS_API_KEY, session_token=st.session_state["session_token"])
-                if debug_mode:
-                    st.code(details_json2, language="json")
-                if formatted2:
+                    st.session_state["del_input"] = formatted2
                     st.session_state["del_address"] = formatted2
                     st.session_state["del_lat"] = lat2
                     st.session_state["del_lon"] = lon2
                     st.success(f"Selected: {formatted2}")
-
-    # FALLBACK geocode if user typed full text and not resolved
-    if ("rest_lat" not in st.session_state or "rest_lon" not in st.session_state) and rest_query and len(rest_query.strip()) >= 6 and GOOGLE_MAPS_API_KEY:
-        formatted_f, la_f, lo_f, gjson = geocode_text_fallback(rest_query, GOOGLE_MAPS_API_KEY)
-        if debug_mode:
-            st.code(gjson, language="json")
-        if formatted_f:
-            st.session_state["rest_address"] = formatted_f
-            st.session_state["rest_lat"] = la_f
-            st.session_state["rest_lon"] = lo_f
-
-    if ("del_lat" not in st.session_state or "del_lon" not in st.session_state) and del_query and len(del_query.strip()) >= 6 and GOOGLE_MAPS_API_KEY:
-        formatted_f2, la_f2, lo_f2, gjson2 = geocode_text_fallback(del_query, GOOGLE_MAPS_API_KEY)
-        if debug_mode:
-            st.code(gjson2, language="json")
-        if formatted_f2:
-            st.session_state["del_address"] = formatted_f2
-            st.session_state["del_lat"] = la_f2
-            st.session_state["del_lon"] = lo_f2
-
-    # Replaced blue info boxes with caption (no blue outline)
-    if "rest_lat" not in st.session_state or "rest_lon" not in st.session_state:
-        st.caption("Tip: Type 'Koramangala, Bangalore' or 'MG Road, Bangalore' and select a suggestion to resolve the location.")
-    if "del_lat" not in st.session_state or "del_lon" not in st.session_state:
-        st.caption("Tip: Type 'Hosur Road, Bangalore' or 'Electronic City, Bangalore' and select a suggestion to resolve the location.")
 
 with col2:
     st.subheader("Order Context")
@@ -289,11 +250,28 @@ if st.button("PREDICT LATE DELIVERY RISK", use_container_width=True, type="prima
     del_lat = st.session_state.get("del_lat")
     del_lon = st.session_state.get("del_lon")
 
+    # Fallback geocoding if lat/lon not available but user typed something
+    if not all([rest_lat, rest_lon]) and st.session_state.get("rest_input") and GOOGLE_MAPS_API_KEY:
+        formatted_f, la_f, lo_f = geocode_text_fallback(st.session_state.get("rest_input"), GOOGLE_MAPS_API_KEY)
+        if formatted_f:
+            st.session_state["rest_address"] = formatted_f
+            st.session_state["rest_lat"] = la_f
+            st.session_state["rest_lon"] = lo_f
+            rest_lat = la_f; rest_lon = lo_f
+
+    if not all([del_lat, del_lon]) and st.session_state.get("del_input") and GOOGLE_MAPS_API_KEY:
+        formatted_f2, la_f2, lo_f2 = geocode_text_fallback(st.session_state.get("del_input"), GOOGLE_MAPS_API_KEY)
+        if formatted_f2:
+            st.session_state["del_address"] = formatted_f2
+            st.session_state["del_lat"] = la_f2
+            st.session_state["del_lon"] = lo_f2
+            del_lat = la_f2; del_lon = lo_f2
+
     if not all([rest_lat, rest_lon, del_lat, del_lon]):
-        st.error("⚠️ Could not resolve one or both addresses. Try selecting a suggestion or enable Debug to inspect API responses.")
+        st.error("⚠️ Could not resolve one or both addresses. Try typing a clearer address or use the 'Show other suggestions' expander to pick one.")
         st.stop()
 
-    # Feature engineering + model predict (keeps same logic)
+    # Feature engineering and predictions (unchanged)
     delivery_distance_km = haversine(rest_lat, rest_lon, del_lat, del_lon)
     current_temp, weather_main = fetch_realtime_weather(del_lat, del_lon, WEATHER_API_KEY)
     api_res = fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, HERE_API_KEY)
@@ -359,4 +337,4 @@ if st.button("PREDICT LATE DELIVERY RISK", use_container_width=True, type="prima
 
     st.caption(f"Prediction based on: Restaurant @ **{st.session_state.get('rest_address','(not set)')}** to Delivery @ **{st.session_state.get('del_address','(not set)')}**")
 
-# EOF
+# End of app.py

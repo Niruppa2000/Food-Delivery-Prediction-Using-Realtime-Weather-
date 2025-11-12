@@ -1,7 +1,6 @@
 # app.py
 # Real-Time Food Delivery Late Prediction
-# - GOOGLE_MAPS_API_KEY read from environment (e.g., GitHub Secret or Streamlit Secrets)
-# - WEATHER_API_KEY and HERE_API_KEY set inline per user request
+# Robust to missing python-dotenv in the environment (won't crash on import)
 
 import os
 import uuid
@@ -10,25 +9,24 @@ import joblib
 import pandas as pd
 import numpy as np
 import streamlit as st
-from dotenv import load_dotenv
 from datetime import datetime
 
-# -------------------------
-# Load env (safe to keep; if running in hosting with secrets, env will already be populated)
-# -------------------------
-load_dotenv()  # will read .env locally (no-op if not present)
+# Try to load python-dotenv if available (local dev); if not, continue silently.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    # python-dotenv not installed — that's fine on hosted runtimes (they provide env vars)
+    pass
 
 # -------------------------
 # Keys configuration
+# GOOGLE_MAPS_API_KEY is expected to be set in environment (GitHub/Streamlit secrets)
+# WEATHER_API_KEY and HERE_API_KEY are placed inline per user's request
 # -------------------------
-# Google key is picked from environment (so GitHub Secret or host secret works)
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
-
-# Per your request: place the Weather & HERE API keys directly inside the script
-# (Make sure you are comfortable with these being in the file)
 WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f"
 HERE_API_KEY = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw"
-
 PLACEHOLDER_CHECK = "PASTE_YOUR_API_KEY_HERE"
 
 # -------------------------

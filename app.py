@@ -14,7 +14,7 @@ WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f"
 # NOTE: For live traffic, obtain a key from HERE Technologies (Routing API).
 # This key has been provided by the user and is assumed to be active.
 HERE_API_KEY = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" 
-PLACEHOLDER_CHECK = "PASTE_YOUR_API_KEY_HERE" # Generic placeholder for safety check
+PLACEHOLDER_CHECK = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" # Generic placeholder for safety check
 # ==========================================================
 
 # --- Helper Function: Haversine Distance ---
@@ -144,10 +144,10 @@ def fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, api_key):
             
             # Convert to minutes
             traffic_duration_min = traffic_duration_sec / 60.0
-            base_duration_min = base_duration_sec / 60.0
+            base_travel_time_min = base_duration_sec / 60.0
         
             st.success("✅ Live traffic data successfully retrieved from HERE API.")
-            return traffic_duration_min, base_duration_min
+            return traffic_duration_min, base_travel_time_min
         else:
             # Added more robust error logging if route not found
             error_message = data.get('error_description', data.get('title', 'Unknown API Error'))
@@ -192,7 +192,6 @@ if model:
     BASE_SPEED_KM_PER_MIN = 0.5 # Corresponds to 30 km/h baseline speed
     
     # Define traffic multipliers for time-of-day simulation
-    # NOTE: These are now used ONLY if the API call fails or is not enabled.
     if 17 <= order_hour <= 21:
         traffic_multiplier_sim = 1.67 
         traffic_label_sim = 'Jam (Multiplier: 1.67x)'
@@ -209,9 +208,9 @@ if model:
         traffic_multiplier_sim = 1.0 
         traffic_label_sim = 'Low (Multiplier: 1.0x)'
         traffic_icon = "💨"
-        
-    st.markdown(f"**Current Hour Traffic Adjustment ({current_time_ts.strftime('%H:%M')}):** {traffic_icon} `{traffic_label_sim}`")
-    st.markdown("---")
+    
+    # REMOVED: st.markdown(f"**Current Hour Traffic Adjustment...**")
+    # REMOVED: st.markdown("---")
 
 
     # --- Location Inputs (Text-based) ---
@@ -271,7 +270,7 @@ if model:
             
             # 3. Traffic Adjusted Travel Time & Density Categorization
             
-            # Attempt to get real traffic and base time from API
+            # Attempt to get real traffic and base time from HERE API
             api_result = fetch_live_traffic_time(
                 rest_lat, rest_lon, del_lat, del_lon, 
                 HERE_API_KEY # Using the HERE key
@@ -292,13 +291,11 @@ if model:
                 
                 estimated_travel_time_traffic_adjusted = base_travel_time_min * traffic_multiplier_sim
                 traffic_density = traffic_label_sim.split(' ')[0] # Extract 'Jam', 'High', 'Low', etc.
-                base_travel_time_min_calc = base_travel_time_min # Use calculated base for ratio later
             
             else:
                 # If API was successful, traffic_adjusted is the real value.
                 # Now, determine the categorical density required by the model
                 traffic_ratio = estimated_travel_time_traffic_adjusted / base_travel_time_min_api
-                base_travel_time_min_calc = base_travel_time_min_api # Use API base for ratio later
                 
                 # Assign the categorical feature based on how much traffic inflated the time
                 if traffic_ratio >= 1.5:
@@ -310,48 +307,26 @@ if model:
                 else:
                     traffic_density = 'Low'
 
-            # --- Prediction Dataframe Construction (FIXED ERROR) ---
+            # --- Prediction Dataframe Construction (Primary Error Fix) ---
             
-            # We must use the 'Road_Traffic_Density' categorical column!
-            input_data = pd.DataFrame({
+            # DataFrame containing ONLY the 9 raw features. 
+            # The loaded model is assumed to be a full Pipeline that performs 
+            # OHE on 'Weather_Condition' and 'Road_Traffic_Density' internally.
+            input_data_final = pd.DataFrame({
                 'delivery_distance_km': [delivery_distance_km],
                 'preparation_time_min': [prep_time],
                 'restaurant_rating': [rating_rest],
                 'delivery_person_rating': [rating_del],
-                'Weather_Condition': [weather_main], 
+                'Weather_Condition': [weather_main], # Raw categorical
                 'sin_hour': [np.sin(2 * np.pi * order_hour / 24)],
                 'cos_hour': [np.cos(2 * np.pi * order_hour / 24)],
                 'current_temp_c': [current_temp if not np.isnan(current_temp) else 25.0],
-                'Road_Traffic_Density': [traffic_density] 
+                'Road_Traffic_Density': [traffic_density] # Raw categorical
             })
-            
-            # 1. Create dummies from the input data
-            input_data_encoded = pd.get_dummies(input_data, 
-                                                columns=['Road_Traffic_Density', 'Weather_Condition'], 
-                                                drop_first=False)
-
-            # 2. Define the full list of expected feature columns (including all possible OHE columns)
-            # Known Traffic Densities
-            traffic_cols = ['Road_Traffic_Density_High', 'Road_Traffic_Density_Jam', 
-                            'Road_Traffic_Density_Low', 'Road_Traffic_Density_Medium']
-            # Known Weather Conditions
-            weather_cols = ['Weather_Condition_Fog', 'Weather_Condition_Storm', 
-                            'Weather_Condition_Sandstorms', 'Weather_Condition_Cloudy',
-                            'Weather_Condition_Clear', 'Weather_Condition_Windy',
-                            'Weather_Condition_Sunny', 'Weather_Condition_Haze',
-                            'Weather_Condition_Snow', 'Weather_Condition_Rain']
-
-            # The model's expected feature order:
-            final_features = ['delivery_distance_km', 'preparation_time_min', 
-                              'restaurant_rating', 'delivery_person_rating', 
-                              'sin_hour', 'cos_hour', 'current_temp_c'] + traffic_cols + weather_cols
-
-            # 3. Use reindex to guarantee all columns are present (filling missing OHE columns with 0)
-            # and ensure they are in the correct order. This is the fix for the ValueError.
-            input_data_final = input_data_encoded.reindex(columns=final_features, fill_value=0)
             
             # --- Prediction ---
             try:
+                # Pass the raw input directly to the model pipeline
                 prediction_proba = model.predict_proba(input_data_final)[:, 1][0] * 100
             except Exception as e:
                 st.error(f"Prediction Error: Final model prediction failed. Full Error: {e}")
@@ -359,9 +334,19 @@ if model:
             
             # 4. Display Results
             st.subheader("🎯 Prediction Result")
+
+            def get_weather_icon(condition):
+                """Helper to assign an appropriate icon."""
+                if 'rain' in condition.lower() or 'drizzle' in condition.lower() or 'storm' in condition.lower(): return "🌧️"
+                if 'cloud' in condition.lower(): return "☁️"
+                if 'clear' in condition.lower() or 'sunny' in condition.lower(): return "☀️"
+                if 'snow' in condition.lower() or 'hail' in condition.lower(): return "❄️"
+                if 'haze' in condition.lower() or 'fog' in condition.lower(): return "🌫️"
+                if 'wind' in condition.lower(): return "🌬️"
+                return "❓"
             
-            col_res1, col_res2, col_res3 = st.columns(3)
-            
+            col_res1, col_res2, col_res3, col_res4 = st.columns(4) 
+
             with col_res1:
                 st.metric("Probability of Being Late", f"{prediction_proba:.2f}%")
             
@@ -370,11 +355,14 @@ if model:
                 st.metric("Traffic-Adj Travel Time", f"{estimated_travel_time_traffic_adjusted:.1f} min")
                 
             with col_res3:
-                temp_display = f"{current_temp:.1f}" if isinstance(current_temp, (int, float)) and not np.isnan(current_temp) else 'N/A'
-                # The density shown here is the CATEGORICAL value used by the model
-                st.metric("Model Traffic Density", traffic_density)
+                # Display the weather prominently (Dashboard Fix)
+                weather_icon = get_weather_icon(weather_main)
+                st.metric("Current Weather", f"{weather_icon} {weather_main}")
 
-            st.markdown(f"**Key Inputs:** Distance: {delivery_distance_km:.2f} km | Traffic: **{traffic_density}** | Weather: **{weather_main}** at {temp_display}°C")
+            with col_res4:
+                temp_display = f"{current_temp:.1f}" if isinstance(current_temp, (int, float)) and not np.isnan(current_temp) else 'N/A'
+                st.metric("Temp (°C)", temp_display)
+            
 
             if prediction_proba > 60:
                 st.error("⚠️ **HIGH RISK:** A late delivery is highly probable due to combined factors. Be proactive in notifying the customer. ")
@@ -384,7 +372,7 @@ if model:
             else:
                 st.success("✅ **LOW RISK:** Delivery is likely to be on time.")
 
-            st.markdown("---")
+            # REMOVED: st.markdown("---")
             st.caption(f"Prediction based on: Restaurant @ **{rest_location_name}** to Delivery @ **{del_location_name}**")
             
 # --- Final Check ---

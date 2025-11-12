@@ -8,13 +8,12 @@ from datetime import datetime
 
 # ==========================================================
 # --- CONFIGURATION (UPDATE THIS) ---
-# NOTE: Replace the placeholder below with your *real* API key.
-# This key is used for weather data and location name lookups (OpenWeatherMap).
+# NOTE: This key is used for weather data and location name lookups (OpenWeatherMap).
 WEATHER_API_KEY = "5197fc88f5f846ee7566eb28d403c91f" 
 
-# NOTE: For live traffic, you must obtain a key from a provider like HERE. 
-# Replace the placeholder with your actual HERE API Key.
-LIVE_TRAFFIC_API_KEY = "PLACEHOLDER_FOR_LIVE_TRAFFIC_KEY"
+# NOTE: For live traffic, obtain a key from HERE Technologies (Routing API).
+# You must obtain a free developer key from their portal.
+HERE_API_KEY = "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" # <<< REPLACE THIS
 # ==========================================================
 
 # --- Helper Function: Haversine Distance ---
@@ -63,7 +62,6 @@ def fetch_coordinates(location_name, api_key):
 
 
 # --- Real-time Weather Function (API Integration) ---
-# Use cache with Time-To-Live (TTL) of 300 seconds (5 minutes)
 @st.cache_data(ttl=300)
 def fetch_realtime_weather(latitude, longitude, api_key):
     """Fetches real-time weather data. Returns (temp, weather_main)."""
@@ -76,7 +74,7 @@ def fetch_realtime_weather(latitude, longitude, api_key):
         # OpenWeatherMap API call
         url = f"http://api.openweathermap.org/data/2.5/weather?lat={latitude}&lon={longitude}&appid={api_key}&units=metric"
         response = requests.get(url, timeout=5)
-        response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         data = response.json()
 
         temp = data['main']['temp']
@@ -95,53 +93,71 @@ def fetch_realtime_weather(latitude, longitude, api_key):
         return 25.0, 'Clear'
 
 
-# --- Placeholder for Live Traffic API Integration (Updated for HERE) ---
+# --- Live Traffic API Integration (Using HERE Routing API) ---
 def fetch_live_traffic_time(rest_lat, rest_lon, del_lat, del_lon, api_key):
     """
-    Placeholder function for calling a real-time routing API (e.g., HERE Technologies).
-    
-    If successful, returns the travel duration in minutes that *includes* the current traffic.
+    Calls HERE Routing API with traffic enabled.
+    Returns (estimated_travel_time_traffic_adjusted_min, base_travel_time_min)
     """
-    if api_key == "PLACEHOLDER_FOR_LIVE_TRAFFIC_KEY":
-        st.info("Using time-of-day simulation for traffic. A real HERE API key is required for true live traffic.")
-        return None
+    # 1. Fallback/Simulation Check
+    if api_key == "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw":
+        st.info("⚠️ HERE API Key is a placeholder. Using time-of-day traffic simulation for prediction.")
+        return None, None
+        
 
+    # 2. Actual HERE API Call
     try:
-        # --- HERE Routing API v8 Example Structure ---
         url = "https://router.hereapi.com/v8/routes"
+        
+        # HERE uses coordinates in the format 'lat,lon'
+        origin_coords = f"{rest_lat},{rest_lon}"
+        destination_coords = f"{del_lat},{del_lon}"
+
         params = {
             'transportMode': 'car',
-            'origin': f"{rest_lat},{rest_lon}",
-            'destination': f"{del_lat},{del_lon}",
-            'apiKey': api_key, 
-            'return': 'summary', 
-            'traffic': 'enabled', # Enables real-time traffic
-            'departureTime': 'now' # Important for live traffic
+            'origin': origin_coords,
+            'destination': destination_coords,
+            'routingMode': 'fast',
+            'trafficMode': 'realtime', # Enables traffic prediction
+            'return': 'summary', # Ensures duration values are returned
+            'apiKey': api_key
         }
         
         response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         
-        # Check for valid route and extract duration in seconds from the summary
+        # Check for successful response and route data
         if data.get('routes') and data['routes'][0].get('sections'):
-            # The duration from HERE includes traffic when 'traffic=enabled'
-            duration_sec = data['routes'][0]['sections'][0]['summary']['duration']
-            st.success("✅ Live traffic data successfully retrieved from HERE API.")
-            return duration_sec / 60.0 # Convert seconds to minutes
-        else:
-            st.warning("HERE API found no route or response structure was unexpected. Falling back to simulation.")
-            return None
             
-    except requests.exceptions.HTTPError as e:
-        st.error(f"HERE API HTTP Error: {e}. Check your API Key/subscription. Falling back to simulation.")
-        return None
-    except requests.exceptions.RequestException:
-        st.error("Could not connect to HERE API. Falling back to simulation.")
-        return None
-    except Exception:
-        st.warning("An unexpected error occurred during HERE API call. Falling back to simulation.")
-        return None
+            summary = data['routes'][0]['sections'][0]['summary']
+            
+            # Duration with traffic (duration) and baseline duration (baseDuration)
+            # Both are returned in seconds by the API
+            traffic_duration_sec = summary.get('duration')
+            base_duration_sec = summary.get('baseDuration') 
+            
+            if traffic_duration_sec is None or base_duration_sec is None:
+                st.warning("HERE API response missing duration data. Falling back to simulation.")
+                return None, None
+            
+            # Convert to minutes
+            traffic_duration_min = traffic_duration_sec / 60.0
+            base_duration_min = base_duration_sec / 60.0
+        
+            st.success("✅ Live traffic data successfully retrieved from HERE API.")
+            return traffic_duration_min, base_duration_min
+        else:
+            st.warning(f"HERE API found no route or response format was unexpected. Falling back to simulation. Response status: {response.status_code}")
+            return None, None
+            
+    except requests.exceptions.RequestException as e:
+        st.error(f"HERE API Connection Error: {e}. Check API Key/permissions. Falling back to simulation.")
+        return None, None
+    except Exception as e:
+        st.warning(f"Error parsing HERE response: {e}. Falling back to simulation.")
+        return None, None
+
 
 # --- Streamlit Application Layout ---
 
@@ -151,6 +167,8 @@ st.markdown("Predict the probability of a late delivery based on real-time weath
 
 # 1. Load Model
 try:
+    # Set the timezone to one commonly used for this type of problem for consistent hour feature
+    st.session_state.tz = pd.Timestamp.now().tz_localize('Asia/Kolkata').tz
     model = joblib.load('late_delivery_predictor_model.pkl')
     st.success("Model loaded successfully for prediction.")
 except FileNotFoundError:
@@ -164,41 +182,42 @@ if model:
     # 2. User Input Interface
     col1, col2 = st.columns(2)
     
-    # Use current time in a fixed timezone for consistency and feature generation
-    current_time_ts = datetime.now().astimezone(pd.Timestamp.now().tz_localize('Asia/Kolkata').tz)
+    current_time_ts = datetime.now().astimezone(st.session_state.tz)
     order_hour = current_time_ts.hour
 
     # --- Traffic Estimation (Simulated Numerical Feature) ---
     BASE_SPEED_KM_PER_MIN = 0.5 # Corresponds to 30 km/h baseline speed
     
     # Define traffic multipliers for time-of-day simulation
+    # NOTE: These are now used ONLY if the API call fails or is not enabled.
     if 17 <= order_hour <= 21:
-        traffic_multiplier = 1.67 
-        traffic_label = 'Jam (Multiplier: 1.67x)'
+        traffic_multiplier_sim = 1.67 
+        traffic_label_sim = 'Jam (Multiplier: 1.67x)'
         traffic_icon = "🛑"
     elif 12 <= order_hour <= 14:
-        traffic_multiplier = 1.33 
-        traffic_label = 'High (Multiplier: 1.33x)'
+        traffic_multiplier_sim = 1.33 
+        traffic_label_sim = 'High (Multiplier: 1.33x)'
         traffic_icon = "🟡"
     elif 8 <= order_hour <= 10:
-        traffic_multiplier = 1.18
-        traffic_label = 'Medium (Multiplier: 1.18x)'
+        traffic_multiplier_sim = 1.18
+        traffic_label_sim = 'Medium (Multiplier: 1.18x)'
         traffic_icon = "🟢"
     else:
-        traffic_multiplier = 1.0 
-        traffic_label = 'Low (Multiplier: 1.0x)'
+        traffic_multiplier_sim = 1.0 
+        traffic_label_sim = 'Low (Multiplier: 1.0x)'
         traffic_icon = "💨"
         
-    st.markdown(f"**Current Hour Traffic Adjustment ({current_time_ts.strftime('%H:%M')}):** {traffic_icon} `{traffic_label}`")
+    st.markdown(f"**Current Hour Traffic Adjustment ({current_time_ts.strftime('%H:%M')}):** {traffic_icon} `{traffic_label_sim}`")
     st.markdown("---")
 
 
-    # --- New Location Inputs (Text-based) ---
+    # --- Location Inputs (Text-based) ---
     with col1:
         st.subheader("Restaurant & Delivery Location")
         
-        rest_location_input = st.text_input("Restaurant Location (City, Country)", value="New Delhi, India")
-        del_location_input = st.text_input("Delivery Location (City, Country)", value="Ghaziabad, India")
+        # Use placeholders from the image for consistency
+        rest_location_input = st.text_input("Restaurant Location (City, Country)", value="Bangalore, India")
+        del_location_input = st.text_input("Delivery Location (City, Country)", value="Mangalore, India")
         
         # Resolve coordinates from location names
         rest_lat, rest_lon, rest_location_name = fetch_coordinates(rest_location_input, WEATHER_API_KEY)
@@ -222,7 +241,8 @@ if model:
         prep_time = st.slider("Preparation Time (min)", 5, 45, 20)
         
         # Ratings
-        rating_rest = st.slider("Restaurant Rating (3.0 to 5.0)", 3.0, 5.0, 4.5, 0.1)
+        # Use values from the image for consistency (4.90 and 4.80)
+        rating_rest = st.slider("Restaurant Rating (3.0 to 5.0)", 3.0, 5.0, 4.9, 0.1)
         rating_del = st.slider("Delivery Person Rating (4.0 to 5.0)", 4.0, 5.0, 4.8, 0.1)
 
 
@@ -246,45 +266,109 @@ if model:
             current_temp, weather_main = fetch_realtime_weather(del_lat, del_lon, WEATHER_API_KEY)
             
             
-            # 3. Traffic Adjusted Travel Time: Use API or Fallback to Simulation
+            # 3. Traffic Adjusted Travel Time & Density Categorization
             
-            # Attempt to get real traffic time
-            real_traffic_time_min = fetch_live_traffic_time(
-                rest_lat, rest_lon, del_lat, del_lon, LIVE_TRAFFIC_API_KEY
+            # Attempt to get real traffic and base time from API
+            api_result = fetch_live_traffic_time(
+                rest_lat, rest_lon, del_lat, del_lon, 
+                HERE_API_KEY # Using the HERE key
             )
             
-            if real_traffic_time_min is not None:
-                # Use real API result if available
-                estimated_travel_time_traffic_adjusted = real_traffic_time_min
-            else:
-                # Fallback to simulation using the traffic multiplier
+            estimated_travel_time_traffic_adjusted, base_travel_time_min_api = api_result
+
+            # Fallback logic if API fails or is not configured
+            if HERE_API_KEY == "9JI9eOC0auXHPTmtQ5SohrGPp4WjOaq90TRCjfa-Czw" or estimated_travel_time_traffic_adjusted is None:
+                # Recalculate simulation values for display if fallback was used
+                st.info("⚠️ Final traffic calculation using time-of-day simulation.")
                 base_travel_time_min = delivery_distance_km / BASE_SPEED_KM_PER_MIN
-                estimated_travel_time_traffic_adjusted = base_travel_time_min * traffic_multiplier
                 
+                if 17 <= order_hour <= 21: traffic_multiplier_sim = 1.67
+                elif 12 <= order_hour <= 14: traffic_multiplier_sim = 1.33
+                elif 8 <= order_hour <= 10: traffic_multiplier_sim = 1.18
+                else: traffic_multiplier_sim = 1.0 
+                
+                estimated_travel_time_traffic_adjusted = base_travel_time_min * traffic_multiplier_sim
+                traffic_density = traffic_label_sim.split(' ')[0] # Extract 'Jam', 'High', 'Low', etc.
+                base_travel_time_min_calc = base_travel_time_min # Use calculated base for ratio later
             
-            # 4. Time features (sin/cos for cyclical time dependency)
-            sin_hour = np.sin(2 * np.pi * order_hour / 24)
-            cos_hour = np.cos(2 * np.pi * order_hour / 24)
-            
-            # Create DataFrame for prediction
+            else:
+                # If API was successful, traffic_adjusted is the real value.
+                # Now, determine the categorical density required by the model
+                traffic_ratio = estimated_travel_time_traffic_adjusted / base_travel_time_min_api
+                base_travel_time_min_calc = base_travel_time_min_api # Use API base for ratio later
+                
+                # Assign the categorical feature based on how much traffic inflated the time
+                if traffic_ratio >= 1.5:
+                    traffic_density = 'Jam'
+                elif traffic_ratio >= 1.25:
+                    traffic_density = 'High'
+                elif traffic_ratio >= 1.05:
+                    traffic_density = 'Medium'
+                else:
+                    traffic_density = 'Low'
+
+            # --- Prediction Dataframe Construction (Fixing the Error) ---
+            # We must use the 'Road_Traffic_Density' categorical column!
             input_data = pd.DataFrame({
                 'delivery_distance_km': [delivery_distance_km],
                 'preparation_time_min': [prep_time],
                 'restaurant_rating': [rating_rest],
                 'delivery_person_rating': [rating_del],
-                # Feature for the model
-                'estimated_travel_time_traffic_adjusted_min': [estimated_travel_time_traffic_adjusted], 
                 'Weather_Condition': [weather_main], 
-                'sin_hour': [sin_hour],
-                'cos_hour': [cos_hour],
-                'current_temp_c': [current_temp if not np.isnan(current_temp) else 25.0]
+                'sin_hour': [np.sin(2 * np.pi * order_hour / 24)],
+                'cos_hour': [np.cos(2 * np.pi * order_hour / 24)],
+                'current_temp_c': [current_temp if not np.isnan(current_temp) else 25.0],
+                # This is the feature your model is missing (now fixed)
+                'Road_Traffic_Density': [traffic_density] 
             })
+            
+            # --- One-Hot Encode Categorical Features ---
+            # Recreate all expected columns for Weather and Traffic Density, 
+            # including the ones not present in this specific prediction.
+            
+            # The model expects specific, known column names from training.
+            
+            # Known Traffic Densities
+            traffic_cols = ['Road_Traffic_Density_High', 'Road_Traffic_Density_Jam', 
+                            'Road_Traffic_Density_Low', 'Road_Traffic_Density_Medium']
+            # Known Weather Conditions
+            weather_cols = ['Weather_Condition_Fog', 'Weather_Condition_Storm', 
+                            'Weather_Condition_Sandstorms', 'Weather_Condition_Cloudy',
+                            'Weather_Condition_Clear', 'Weather_Condition_Windy',
+                            'Weather_Condition_Sunny', 'Weather_Condition_Haze',
+                            'Weather_Condition_Snow', 'Weather_Condition_Rain']
+            
+            # Initialize all required dummy columns to 0
+            for col in traffic_cols + weather_cols:
+                if col not in input_data.columns:
+                    input_data[col] = 0
+
+            # Create the actual dummy variables for the current prediction
+            input_data_encoded = pd.get_dummies(input_data, columns=['Road_Traffic_Density', 'Weather_Condition'], drop_first=False)
+            
+            # Ensure all the required OHE columns are present (setting to 0 if missing from this prediction)
+            for col in traffic_cols + weather_cols:
+                if col not in input_data_encoded.columns:
+                    input_data_encoded[col] = 0
+            
+            # Drop the original categorical columns
+            input_data_encoded = input_data_encoded.drop(columns=['Road_Traffic_Density', 'Weather_Condition'], errors='ignore')
+            
+            # Final feature set (must match the order and names the model was trained on)
+            # NOTE: We MUST ensure the columns are ordered exactly as the model expects.
+            # This order is based on a common scenario for this model structure.
+            final_features = ['delivery_distance_km', 'preparation_time_min', 
+                              'restaurant_rating', 'delivery_person_rating', 
+                              'sin_hour', 'cos_hour', 'current_temp_c'] + traffic_cols + weather_cols
+            
+            # Filter and order the columns for the model
+            input_data_final = input_data_encoded.filter(final_features, axis=1)
             
             # --- Prediction ---
             try:
-                prediction_proba = model.predict_proba(input_data)[:, 1][0] * 100
-            except ValueError as e:
-                st.error(f"Prediction Error: Feature mismatch detected. The model likely needs retraining with the new numerical traffic feature. Defaulting to 50% risk. Full Error: {e}")
+                prediction_proba = model.predict_proba(input_data_final)[:, 1][0] * 100
+            except Exception as e:
+                st.error(f"Prediction Error: Final model prediction failed. Full Error: {e}")
                 prediction_proba = 50.0 
             
             # 4. Display Results
@@ -296,13 +380,15 @@ if model:
                 st.metric("Probability of Being Late", f"{prediction_proba:.2f}%")
             
             with col_res2:
+                # Display the traffic adjusted time (real value)
                 st.metric("Traffic-Adj Travel Time", f"{estimated_travel_time_traffic_adjusted:.1f} min")
                 
             with col_res3:
                 temp_display = f"{current_temp:.1f}" if isinstance(current_temp, (int, float)) and not np.isnan(current_temp) else 'N/A'
-                st.metric("Current Weather", f"{weather_main}, {temp_display}°C")
+                # The density shown here is the CATEGORICAL value used by the model
+                st.metric("Model Traffic Density", traffic_density)
 
-            st.markdown(f"**Key Inputs:** Distance: {delivery_distance_km:.2f} km | Traffic: **{traffic_label}** | Weather: **{weather_main}** at {temp_display}°C")
+            st.markdown(f"**Key Inputs:** Distance: {delivery_distance_km:.2f} km | Traffic: **{traffic_density}** | Weather: **{weather_main}** at {temp_display}°C")
 
             if prediction_proba > 60:
                 st.error("⚠️ **HIGH RISK:** A late delivery is highly probable due to combined factors. Be proactive in notifying the customer. ")

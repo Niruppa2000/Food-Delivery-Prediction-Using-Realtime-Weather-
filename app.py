@@ -1,10 +1,3 @@
-# app.py
-# Improved server-side Google Places autocomplete UX for Streamlit
-# - Inline compact dropdown below each text input (no extra JSON or debug lines)
-# - Auto-fill top suggestion when appropriate
-# - Selectbox uses label_visibility='collapsed' so it's visually compact
-# - Uses Place Details to get formatted address and lat/lon for prediction
-
 import os
 import uuid
 import requests
